@@ -4,6 +4,8 @@ import cv2
 import random
 import math
 import copy
+import json
+#import DB
 
 
 def make_gridmap(dense, *args):
@@ -73,7 +75,7 @@ def cal_obj_center(mask):
     obj_cy = int(M['m01'] / M['m00'])
     return (obj_cx, obj_cy)
 
-def re_cal_mask(obj_map):
+def cal_mask(obj_map, ori_area, area_ratio_th = 0.06):
     '''
     mask를 가려진부분 제외하고 실제로 진짜 보이는 부분으로 다시 얻어냄
     mask_map을 사전에 만들어 두었고 거기서 현재 물품을 제외한 다른 물품은 전부 0이므로 
@@ -86,23 +88,28 @@ def re_cal_mask(obj_map):
     
     if len(contours)==0:
         #print('싹다가려짐')
-        return [[-1,-1]]
+        return [[-1,-1]], 0
     elif len(contours)>1:
         # 물품이 서로 가려지는것 때문에 영역이 2개이상으로 잡히는 경우가 발생함
         # size 측정해서 가장 큰값만 남기는게 맞음
         #print('애매하게 가려져서 조각남')
         area = [cv2.contourArea(a) for a in contours]
         m = contours[area.index(max(area))]
-        result = np.reshape(m,(m.shape[0],2))
-    else :
+    else:
         m = contours[0]
-    if cv2.contourArea(m)<500:
-        #print('mask 크기가 너무 작음')
-        return [[-1,-1]]
-    mask = np.reshape(m,(m.shape[0],2))
-    return mask
+        
+    #물품이 가려진 비율 계산
+    re_area = cv2.contourArea(m)
+    #print('크기 비교:{},{}'.format(area, re_area))
+    a_ratio = re_area/ori_area
+    if a_ratio<area_ratio_th:
+        print('mask 크기가 너무 작음')
+        return [[-1,-1]], 0
 
-def re_cal_bbox(obj_map, mask, center, threshold):
+    mask = np.reshape(m,(m.shape[0],2))
+    return mask, re_area
+
+def cal_bbox(obj_map, mask, center, threshold):
     '''
     bbox를 다시 계산하는 함수
     bbox의 경우 실제 물품전체가 아닌 윗부분만 잘라서 검출한다고 가정하기 때문에 
@@ -184,32 +191,34 @@ def re_cal_bbox(obj_map, mask, center, threshold):
     ro_m2 = cv2.getRotationMatrix2D((ro_img_w/2,ro_img_h/2), degree, 1)
     rotate_region = cv2.warpAffine(obj_region, ro_m2,(ro_img_w, ro_img_h))
     
+    
     # 5. 실제 bbox만 남기기 위해서 잘라내기
     #물품이 수직방향이기 때문에 threshold 기준을 y축을 기준으로 잡으면 됨
     #cut_late = threshold[0][0] + abs(abs(abs(degree)-90) - 45) / 45 * threshold[0][1]
     
     #(1) 일단 1차 기준의 경우 1차 기준 밑으로는 다 잘라냄(예외없이 싹뚝) 
     cut_length1 = int((rotate_size[4] * (threshold[0][0] + abs(abs(abs(degree)-90) - 45) / 45 * threshold[0][1])))
+    mask_cut1 = int(ro_img_h/2+rotate_size[3]-obj_center[1] - cut_length1)
     if cut_length1<rotate_size[5] :
-        mask_cut1 = int(ro_img_h/2+rotate_size[3]-obj_center[1] - cut_length1)
         min_y = int(ro_img_h/2+rotate_size[1]-obj_center[1])-5
         if min_y<0 : min_y=0
         rotate_region[min_y:mask_cut1] = np.zeros((mask_cut1-min_y, ro_img_w, 3), dtype=np.uint8)
-    else : 
-        mask_cut1 = int(ro_img_h/2+region_size[1]-obj_center[1])-5
-        if mask_cut1<0 : mask_cut1=0
+    #else : 
+    #    print('1차기준 안에 물품이 다 포함됨')
+    #    mask_cut1 = int(ro_img_h/2+region_size[1]-obj_center[1])-5
+    #    if mask_cut1<0 : mask_cut1=0
     
     cut_length2 = int(rotate_size[4] * (threshold[1][0] + abs(abs(abs(degree)-90)- 45) / 45 * threshold[1][1]))
     mask_cut2 = int(ro_img_h/2+rotate_size[3]-obj_center[1] - cut_length2)
-
+        
     #(2) 이제 한줄씩 읽어가면서 물품의 영역이 얼만큼 차지하는지 비율에 따라서 잘라낼지 아닐지를 결정
-    for y in range(mask_cut1, mask_cut2, -1):
+    for y in range(mask_cut1-1, mask_cut2, 1):
         aver_value = np.sum(obj_region[y])/rotate_size[4]
         if aver_value >128:
-            if (mask_cut1-y-1)<1:
+            if (y-mask_cut1+1)<0:
                 print("합성쪽 에러")
                 print('mask_cu1:{0}, mask_cut2:{1}, y:{2}'.format(mask_cut1, mask_cut2, y))
-            rotate_region[y+1 : mask_cut2 ] = np.zeros((mask_cut1-y-1, ro_img_w, 3), dtype=np.uint8)
+            rotate_region[mask_cut1-1 : y ] = np.zeros((y-mask_cut1+1, ro_img_w, 3), dtype=np.uint8)
             break
          
     # 8. 이제 원래로 다시 역 변환 
@@ -313,29 +322,32 @@ def check_overlap(bbox1, bbox2):
     
 def related_mask_map(map_size,tar_mask, a_mask, other_mask_value=-3):
     '''
-    mask맵 생성하는부분
+    현재 bbox를 조정하려고 하는 물품과 그 주변에 bbox가 겹치는 물품을 포함해서 mask맵 생성하는부분
+    배경은 0, 현재 bbox를 조정하려고 하는 물품은 1
+    주변에 bbox가 겹치는 물품은 -3 ~ -4 정도가 좋으며 디폴트는 -3으로 설정
     '''
     mask_map = np.zeros((map_size[3]-map_size[1], map_size[2]-map_size[0],3), dtype=np.int16)
-    check_map = np.zeros((map_size[3]-map_size[1], map_size[2]-map_size[0],3), dtype=np.uint8)
+    #check_map = np.zeros((map_size[3]-map_size[1], map_size[2]-map_size[0],3), dtype=np.uint8)
     t_m = tar_mask-[map_size[0],map_size[1]]
     cv2.drawContours(mask_map, [t_m], -1,(1,1,1), -1)
-    cv2.drawContours(check_map, [t_m], -1,(100,100,100), -1)
+    #cv2.drawContours(check_map, [t_m], -1,(100,100,100), -1)
     for a in a_mask:
         a_m = a-[map_size[0],map_size[1]]
         cv2.drawContours(mask_map, [a_m], -1,(other_mask_value,other_mask_value,other_mask_value), -1)
-        cv2.drawContours(check_map, [a_m], -1,(200,200,200), -1)
+        #cv2.drawContours(check_map, [a_m], -1,(200,200,200), -1)
     
     #mask_map.astype(np.int32)
     #mask_map2 = np.where(mask_map==3, other_mask_value, mask_map)
     
-    return mask_map,check_map
+    #return mask_map,check_map
+    return mask_map
 
-def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
+def re_cal_bbox(target, around_grid, around_box, region_num, around_object_value, re_cal_search_region=0.5):
     '''
     접근 방식을 바꿈
     아예 주변 물체의 마스크를 덮어씌운 중간 이상 크기의 맵을 따로 만든다음 
-    타겟 물체는 1, 주변 물체는 2로 마스크 맵을생성 
-    그리고 그 마스크 맵에서 target의 크기를 줄일 수 있는 방향으로(좌우로 하나 위아래로 하나)
+    타겟 물체와, 주변 물체만 있는 map을 가지고
+    마스크 맵에서 target의 크기를 줄일 수 있는 방향으로(좌우로 하나 위아래로 하나)
     순차적으로 줄여가면서(한 절반정도) 적절한 크기를 찾음
     찾는 방식은 일단 1. 주변물체의 마스크의 영역이 가하는폭/현재 타겟물체의 마스크 영역이 감소하는 폭
     '''
@@ -354,7 +366,8 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
         if map_size[3]<(a_b[1]+a_b[3]): map_size[3]=a_b[1]+a_b[3]
         a_mask.append(a['mask'])
     
-    mask_map, check_map = related_mask_map(map_size, target['mask'], a_mask)
+    #mask_map, check_map = related_mask_map(map_size, target['mask'], a_mask)
+    mask_map = related_mask_map(map_size, target['mask'], a_mask, around_object_value)
     #결과확인용
     #cv2.imshow('mask_map',check_map)
     #cv2.waitKey(1)
@@ -363,7 +376,7 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
     #감소할 값 설정은 앞서구했던 region_num으로 구함
     #대각(1,3,7,9 영역)이랑 4방향(위,아래,좌우, 2,4,6,8영역을 분리해서 계싼)
     #정중앙(5영역)은 계산X 어차피 불필요
-    optimal_value= -100000
+    initial_value= np.sum(mask_map)
     re_bbox = target['bbox'].copy()
     if (region_num==1) or (region_num==3) or (region_num==7) or (region_num==9):
         #대각인경우
@@ -381,17 +394,18 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
             y_value=1
         if x_value==-1:
             x_start = target['bbox'][2]+target['bbox'][0]-map_size[0]
-            x_end = x_start-int(target['bbox'][2]*serach_point)
+            x_end = x_start-int(target['bbox'][2]*re_cal_search_region)
         else :
             x_start = target['bbox'][0]-map_size[0]
-            x_end = x_start+int(target['bbox'][2]*serach_point)
+            x_end = x_start+int(target['bbox'][2]*re_cal_search_region)
         if y_value==-1:
             y_start = target['bbox'][3]+target['bbox'][1]-map_size[1]
-            y_end = y_start-int(target['bbox'][3]*serach_point)
+            y_end = y_start-int(target['bbox'][3]*re_cal_search_region)
         else :
             y_start = target['bbox'][1]-map_size[1]
-            y_end = y_start+int(target['bbox'][3]*serach_point)
+            y_end = y_start+int(target['bbox'][3]*re_cal_search_region)
         
+        optimal_value = initial_value
         optimal_pos=[x_start,y_start]
         #이제 계산시작
         for y in range(y_start, y_end, y_value):
@@ -438,24 +452,25 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
             if region_num==2:
                 y_value = -1
                 y_start =  target['bbox'][3]+target['bbox'][1]-map_size[1]
-                y_end =  y_start-int(target['bbox'][3]*serach_point)
+                y_end =  y_start-int(target['bbox'][3]*re_cal_search_region)
             else : 
                 y_value=1
                 y_start = target['bbox'][1]-map_size[1]
-                y_end = y_start+int(target['bbox'][3]*serach_point)
+                y_end = y_start+int(target['bbox'][3]*re_cal_search_region)
             #x축은 상자 2개로 설정
             #상자설정
             x1_start = target['bbox'][0]-map_size[0]
-            x1_end = x1_start+int(target['bbox'][2]*serach_point*0.5)
+            x1_end = x1_start+int(target['bbox'][2]*re_cal_search_region*0.5)
             x2_start = target['bbox'][2]+target['bbox'][0]-map_size[0]
-            x2_end = x2_start-int(target['bbox'][2]*serach_point*0.5)
-            x_c = target['bbox'][0]+int(target['bbox'][2]*serach_point)-map_size[0]
+            x2_end = x2_start-int(target['bbox'][2]*re_cal_search_region*0.5)
+            x_c = target['bbox'][0]+int(target['bbox'][2]*re_cal_search_region)-map_size[0]
 
             optimal_pos=[x1_start, x2_start, y_start]
             optimal_x_pos=[x1_start, x2_start]
+            optimal_value = initial_value*2
             #이제 계산시작
             for y in range(y_start, y_end, y_value):
-                optimal_x = [-100000,-100000]
+                optimal_x = [initial_value,initial_value]
                 if y_value==-1: 
                     y1 = target['bbox'][1]-map_size[1]
                     y2 = y
@@ -487,7 +502,6 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
             else : 
                 re_bbox[3] = re_bbox[3]-(optimal_pos[2]+map_size[1]-re_bbox[1])
                 re_bbox[1] = optimal_pos[2]+map_size[1]
-
         
         else:
             #여기는 좌우영역
@@ -495,24 +509,25 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
             if region_num==4:
                 x_value = -1
                 x_start =  target['bbox'][2]+target['bbox'][0]-map_size[0]
-                x_end =  x_start-int(target['bbox'][2]*serach_point)
+                x_end =  x_start-int(target['bbox'][2]*re_cal_search_region)
             else : 
                 x_value= 1
                 x_start = target['bbox'][0]-map_size[0]
-                x_end = x_start+int(target['bbox'][2]*serach_point)
+                x_end = x_start+int(target['bbox'][2]*re_cal_search_region)
             #y축은 상자 2개로 설정
             #상자설정
             y1_start = target['bbox'][1]-map_size[1]
-            y1_end = y1_start+int(target['bbox'][3]*serach_point*0.5)
+            y1_end = y1_start+int(target['bbox'][3]*re_cal_search_region*0.5)
             y2_start = target['bbox'][3]+target['bbox'][1]-map_size[1]
-            y2_end = y2_start-int(target['bbox'][3]*serach_point*0.5)
-            y_c = target['bbox'][1]+int(target['bbox'][3]*serach_point)-map_size[1]
+            y2_end = y2_start-int(target['bbox'][3]*re_cal_search_region*0.5)
+            y_c = target['bbox'][1]+int(target['bbox'][3]*re_cal_search_region)-map_size[1]
             
             optimal_pos=[x_start, y1_start, y2_start]
             optimal_y_pos=[y1_start, y2_start]
+            optimal_value = initial_value*2
             #이제 계산시작
             for x in range(x_start, x_end, x_value):
-                optimal_y = [-100000,-100000]
+                optimal_y = [initial_value,initial_value]
                 if x_value==-1: 
                     x1 = target['bbox'][0]-map_size[0]
                     x2 = x
@@ -550,7 +565,7 @@ def reduce_bbox(target, around_grid, around_box, region_num, serach_point=0.5):
     #cv2.waitKey(0)
     return re_bbox
     
-def adjust_bbox(segment, batch_map, grid, image_data):
+def revise_bbox(segment, batch_map, grid, image_data, around_object_value, re_cal_search_region):
     '''
     bbox 자체는 이미 한번 계산이 되었으나, 문제가 발생될 것 같아서 재수정이 필요한 부분을 따로 추가함
     즉 bbox가 이미 다시 계산이 되었는데도 서로 겹치는 경우를 여기에 작성
@@ -566,7 +581,7 @@ def adjust_bbox(segment, batch_map, grid, image_data):
     '''
     # 우선 re_seg를 일단 batch map 형식으로 재배치
     seg_batch_map = copy.deepcopy(batch_map)
-    print(batch_map)
+    #print(batch_map)
     
     for seg, img_info in zip(segment, image_data):
         seg_batch_map[img_info['grid_x']][img_info['grid_y']] = seg
@@ -579,6 +594,7 @@ def adjust_bbox(segment, batch_map, grid, image_data):
         g_y = img_info['grid_y']
         region_num, search_pos = related_pos(g_x,g_y, grid[0],grid[1], batch_map)
 
+        #정중앙인경우이고, 보통 무시해도 상관없긴함
         if region_num==5:
             break
         if len(search_pos)==0:
@@ -596,7 +612,7 @@ def adjust_bbox(segment, batch_map, grid, image_data):
         if len(around_grid)==0:
             continue
         else:
-            bbox_update=reduce_bbox(seg_batch_map[g_x][g_y], around_grid, around_bbox, region_num)
+            bbox_update=re_cal_bbox(seg_batch_map[g_x][g_y], around_grid, around_bbox, region_num, around_object_value, re_cal_search_region)
             seg_batch_map[g_x][g_y]['bbox'] = bbox_update
     
     # 이제 수정한 batch_map 기준으로 segmentation 정보 재정렬
@@ -612,7 +628,7 @@ class augment:
     '''
     물품 합성용 클래스
     '''
-    def __init__(self, grid, object_category, category_grid, center, batch_method, background_image, shadow_flag):
+    def __init__(self, grid, object_category, batch_method, background_image, shadow_flag=1, center=None, category_grid=None):
         '''
         입력 :
         그리드 정보, 배치할 물품 정보, 물품별 배치가능 범위, 배치 방식, 백그라운드 이미지, 그림자 여부, 중심값
@@ -624,17 +640,25 @@ class augment:
         # 현재 사용할 category 정보, list, tuple 둘 중 뭐든 상관없을듯
         #ex)[3 , 7, 4, 5, 13....]
         self.object_category = object_category
+        #카테고리 종류 최대치
         self.category_num = len(object_category)
+        
         # category에 맞는 grid 맵 정보로 3d list
         #[물품종류][가로][세로]
-        self.category_grid = category_grid
+        if category_grid==None:
+            self.category_grid = list([[[1 for row in range(grid[1])] for col in range(grid[0])]for cate in range(len(object_category))])
+        else:
+            self.category_grid = category_grid
         # batch_method는 1,2,3  3가지
         # 1. 열별 배치, 그리고 같은 열은 단일 물품
         # 2. 열별로 배치, 대신 물품 종류는 랜덤
         # 3. 랜덤 배치
         # 중심점 위치 입력, tuple
         #이미지의 중심이 아닌 실제 매대의 중심좌표를 입력해야함
-        self.center = center;
+        if center==None:
+            self.center = (int(background.shape[1]/2), int(background.shape[0]/2))
+        else:
+            self.center = center
         self.batch_method = batch_method
         # 배경 이미지
         # opencv에서 이미지 읽어올때 쓰는 형태면 상관없긴 한데 그게 아니면 아래와같이  수정이 필요할지도
@@ -643,22 +667,44 @@ class augment:
         # 그림자 옵션 추가 여부
         self.shadow_flag = shadow_flag
         # threshold 기준
-        # param1,2 로 나뉘어 지고 
-        # 1은 
-        self.threshold_param1=[1.0, 0.3]
-        self.threshold_param2=[0.7, 0.2]
-        self.object_dense = 0.7
-        self.rand_option = 1
-        self.array_method = 1
-        #self.center_x = 660
-        #self.center_y = 585
-        self.img_w = 1320
-        self.img_h = 1170
-        self.shadow_value = 30
+        # param1,2 로 나뉘어 지고 물품의 가로길이를 기준으로 세로로 얼마만큼 잘라낼지 판단
+        # 1은 무조건 잘라내는 기준이고, 수직보다는 대각선을 더 많이 잘라낸다고 보면됨
+        # 그래서 대각선은 th1기준으로 1.0, 수직은 1.3
+        # th2에서는 대각선 0.7, 수직은 0.9
+        self.threshold_param1=(1.0, 0.3)
+        self.threshold_param2=(0.7, 0.2)
+        #물품이 배치될때 전체에서 얼마만큼 비율로 배치될지 정하는 파라미터
+        self.object_dense = 0.5
         # rand option같은 경우 0과 1이 차이가 있는데
         #0은 배치할때 확률이 dense가 0.3이면 무조건 30%는 배치가 되어야함. 즉 49칸이면 15칸만 딱 물품이 배치
         #반대로 1은 각각의 위치별로 물품이 존재 할 확률이 30%, 실제 배치되는 갯수는 이미지마다 다르며, Normal 분포를 가짐
-
+        self.rand_option = 1
+        # array_method 1이면 음료수 물품과 같이 중앙이 가장 크고 가로 갈수록 가려지는 형태
+        # array_method 2이면 트레이 설치된 경우로 뒷쪽 물품이 점점 가려지는 형태
+        # 다만 array_method 2는 코드를 짜다가 말아서, 현재는 안된다고 봐야함
+        self.array_method = 1
+        # 이미지 가로,세로길이를 background 이미지크기에서 받아오도록 설정함
+        self.img_w = background.shape[1]
+        self.img_h = background.shape[0]
+        # 타원관련 파라미터
+        # 물품의 가로, 세로 길이를 기반으로 위에 shadow_value를 포함해서 실제 타원의 크기에 영향을 줌 
+        self.ellipse_param = (0.4, 0.5)
+        # 그림자를 타원형태로 단순하게 만드는데 사용하는 방식이 픽셀값이 1차이인 타원을 수십개를 이미지에 붙여서 만드는 형태로 사용함
+        # 여기서 사용되는 타원갯수와 가장 진한 타원의 픽셀값이 shadow_value가 됨
+        self.shadow_value = 30
+        # 물품끼리 서로 겹치게 될 경우 물품이 거의 안보이게 되는데 그러면 삭제가 필요함
+        # 삭제하는 기준을 원래 물품의 mask 영역 크기와 나중에 가려져서 거의다 가려질 경우 남은 영역크기 비율로 제거하려고 함
+        # 즉 여기서 가려진게 94% 이상 가려지면 검출 불가능이라고 판단해서 지우는 형태로 구현
+        self.delete_ratio_th = 0.06
+        # 물품끼리 겹치는 경우 bbox를 재 계산할때 필요한 파라미터로 가려지는 쪽보다 가리는 쪽에 가중치를 더 많이 둬야
+        # 위쪽의 뚜껑부분이 덜 문제가 발생됨
+        # 계산시 영역내부의 픽셀합으로 계산하는데 가리는쪽이 -값이여야 됨
+        # -3~-4정도로 설정하면 무난할듯
+        self.around_object_weight = -3
+        # 마지막에 bbox 다시 보정용으로 재계산할때 필요
+        # 실제 물품의 사이즈 줄여가면서 적합한 bbox를 다시 계산하는데 얼만큼 줄일지 판단하는 값
+        self.re_cal_search_region = 0.5
+        
     def compose_batch(self):
         '''
         그리드 위에서 물품을 어떻게 배치할지 설정하는 부분
@@ -754,21 +800,107 @@ class augment:
         #print("물품 배치 완료")
 
         self.batch_map = batch_map
+        print(batch_map)
         #return batch_map
   
 
-    def load_DB(self, batch_map):
+    def load_DB(self, batch_map=None):
         '''
-        그리드별 배치 정보를 기반으로 필요한 정보를 읽어옴
-        입력 : 그리드별 배치정보
-        출력: 필요한 DB정보(배치할 물품위치에 맞는 이미지, segmentation 정보)
+        image_data 라는 리스트에 전부 데이터를 저장하며
+        각 위치별로 이미지, bbox, mask 정보는 각각 딕셔너리 형태로 저장
+        즉 딕셔너리의 데이터를 list로 만들어 놓은걸 self.image_data로 저장
+        데이터의 구성 : 
+        위치별로 물품이 하나씩 배치가 때문에 그 각각의 위치별 물품 정보를  
+        따로 저장해서 나중에 사용함
+        배치될 물품 하나당 딕셔너리의 데이터 하나씩 만들어지며 
+        각각의 파라미터는 다음과 같음
+        ['mask_value'] = mask map만들때 사용되며 랜덤한 값이 각각 할당 됨, 
+        category 와 다른 값을 사용하는 이유는 같은 물품이라도 별도로 구별하기 위해서 따로 랜덤한 값을 넣음
+        ['grid_x'], ['grid_y'] : 각 물품별 그리드 위치
+        ['category'] : 말그대로 카테고리 넘버, 
+        ['bbox'] : bbox 정보, x, y , w ,h 순서로 list로 저장
+        ['mask'] : 마스크 정보 - [[x1, y1], [x2, y2], [x3, y3], ... , [xn, yn]] 식으로 구성
+        ['area'] : 마스크 내부의 영역크기
+        ['image'] : 물체가 그 그리드에 배치가 된 이미지, 나중에 합성시 사용
         '''
-        # 여기는 실제로 API로 DB에서 읽어오는 부분을 나중에 추가
-        print("not written code")
-  
+        if batch_map!=None:
+            self.batch_map = batch_map
+        print("데이터 읽기 시작")
+        image_data = []
+        # 여기서 물품 합성시 중앙에서 가장 먼 순서대로 배치 할 수 있도록 조정
+        batch = array_DB_batch(self.grid, self.batch_map, self.array_method)
+        self.batch_num = len(batch)
+        #나중에 실제 합성시 따로 필요한 정보
+
+        mask_value = list(range(1, self.batch_num*(255//self.batch_num)+1,(255//self.batch_num)))
+        random.shuffle(mask_value)
+
+        #DB접속
+        db = DB.DB('192.168.10.69', 3306, 'root', 'return123', 'test')
+        
+        #for col in range(self.grid[0]):
+        #   for row in range(self.grid[1]):
+        for b, v in zip(batch, mask_value):
+            # batch에서 카테고리 정보 가져옴
+            cate_id = self.batch_map[b[0]][b[1]]
+            
+            #그리드 정보는 재배열된 batch정보에서 바로 얻어내서 저장
+            data_info = {'grid_x':b[0],'grid_y':b[1]}
+            # mask_value는 그냥 랜덤한 값이므로 바로 같이 저장
+            data_info['mask_value'] = v
+            # 카테고리 정보 저장
+            data_info['category'] = cate_id
+
+            grid_str = str('{}x{}').format(grid[0],grid[1])
+            location_str = str('{}x{}').format(b[0],b[1])
+            iteration = random.randrange(1,4)
+
+            grid_id = db.get_grid_id_from_args("7x7")
+            location_id = db.get_location_id_from_args(str(grid_id), "2x3")
+            #super_category_id = db.get_supercategory_id_from_args("음료")
+            #category_id = db.get_category_id_from_args(str(super_category_id), "콜라")
+
+            # 원하는 오브젝트 호출
+            """
+            def get_obj_id_from_args(self, loc_id, category_id, iteration, mix_num):
+                    Object table의 id를 반환
+                    Args:
+                        loc_id (str): Object table의 loc_id
+                        category_id (str): Object table의 category_id
+                        iteration (str): Object table의 iteration
+                        mix_num (str): Object table의 mix_num
+                    Return:
+                        int: Object table의 id
+                        None: 조회 실패
+            """
+            obj_id = db.get_obj_id_from_args(location_id, cate_id, "1", "-1")
+            
+            # 해당 오브젝트의 마스크 정보 호출
+            mask = sorted(db.mask_info(str(obj_id)))
+            
+            #mask 정보 저장
+            data_info['mask'] = mask
+            mask_np = np.array(mask)
+            area = cv2.contourArea(mask_np)
+            data_info['area'] = area
+            
+            # 해당 오브젝트의 이미지 호출
+            image_id = str(db.get_table(str(obj_id), "Object")[0])
+            im_data = db.get_table(image_id, "Image")[2]
+
+            #이미지 저장
+            data_info['image'] = im_data
+            
+            #각각의 딕셔너리 파일을 list로 쌓음
+            image_data.append(data_info)
+        
+        # 최종적으로 저장된 파일을 self로 저장
+        self.image_data = image_data
+        print("데이터 읽기 완료")
+
 
       
-    def load_DB_folder(self, image_folder, seg_folder,batch_map):
+    def load_DB_folder(self, image_folder, seg_folder, batch_map=None):
         '''
         위의 load_DB를 임시로 대신하는 코드, 실제 데이터를 읽어서 테스트 하기 위해서 사용
         image_data 라는 리스트에 전부 데이터를 저장하며
@@ -785,17 +917,19 @@ class augment:
         ['category'] : 말그대로 카테고리 넘버, 
         ['bbox'] : bbox 정보, x, y , w ,h 순서로 list로 저장
         ['mask'] : 마스크 정보 - [[x1, y1], [x2, y2], [x3, y3], ... , [xn, yn]] 식으로 구성
+        ['area'] : 마스크 내부의 영역크기
         ['image'] : 물체가 그 그리드에 배치가 된 이미지, 나중에 합성시 사용
         '''
         
-        self.batch_map = batch_map
+        if batch_map!=None:
+            self.batch_map = batch_map
         print("데이터 읽기 시작")
         image_data = []
         # 여기서 물품 합성시 중앙에서 가장 먼 순서대로 배치 할 수 있도록 조정
         batch = array_DB_batch(self.grid, self.batch_map, self.array_method)
         self.batch_num = len(batch)
         #나중에 실제 합성시 따로 필요한 정보
-        mask_value = list(range(1, self.batch_num*4+1,4))
+        mask_value = list(range(1, self.batch_num*(255//self.batch_num)+1,(255//self.batch_num)))
         random.shuffle(mask_value)
         
         #for col in range(self.grid[0]):
@@ -816,7 +950,7 @@ class augment:
             num_locate = cate_num*self.grid[0]*self.grid[1] - (b[1]*self.grid[1]+b[0])
             
             #기존 segment 정보가 txt로 저장되어 있어서 그거 읽는것
-            seg_path = '{0}\\{1:02d}\\{2}\\{3:06d}.txt'.format(seg_folder, num_tenth, cate_num, num_locate)
+            seg_path = '{0}/{1:02d}/{2}/{3:06d}.txt'.format(seg_folder, num_tenth, cate_num, num_locate)
             f = open(seg_path, 'r')
             #bbox 정보
             info_line_bbox = f.readline()
@@ -839,9 +973,13 @@ class augment:
                 mask.append([x_value, y_value])
             #mask 정보 저장
             data_info['mask'] = mask
+            mask_np = np.array(mask)
+            area = cv2.contourArea(mask_np)
+            data_info['area'] = area
+            #print(area)
             
             #이미지를 opencv로 읽어오기
-            image_path = '{0}\\{1:02d}\\{2}\\{3:06d}.jpg'.format(image_folder, num_tenth, cate_num, num_locate)
+            image_path = '{0}/{1:02d}/{2}/{3:06d}.jpg'.format(image_folder, num_tenth, cate_num, num_locate)
             img = cv2.imread(image_path)
             #이미지 저장
             data_info['image'] = img
@@ -913,7 +1051,8 @@ class augment:
                 #크기가 다른 shadow_value개의 타원을을 순차적으로 겹쳐서 부드럽게 그림자를 만듬
                 for j in range(self.shadow_value):
                     w_d = (self.shadow_value-j+1)*0.2/(self.shadow_value+1)
-                    cv2.ellipse(shadow, obj_center, (int(length_w * 0.4 + length_h * w_d), int(length_h * 0.5)),                                 (angle * 180 / math.pi), 0, 360,(j, j, j), -1)
+                    cv2.ellipse(shadow, obj_center, (int(length_w * self.ellipse_param[0] + length_h * w_d), int(length_h * self.ellipse_param[1])), \
+                                (angle * 180 / math.pi), 0, 360,(j, j, j), -1)
                 
                 shadow_background_img = shadow_background_img + shadow 
                 
@@ -1007,7 +1146,7 @@ class augment:
         bbox와 mask를 다시 계산하는 함수를 따로 불러서
         각각 계산을 따로 진행
         '''
-        re_seg = []
+        cal_seg = []
         aug_seg_img = self.aug_img.copy()
         aug_seg_img2 = self.aug_img.copy()
         deleted_info = []
@@ -1021,35 +1160,35 @@ class augment:
             threshold = [self.threshold_param1, self.threshold_param2]
             
             obj_map = deleted_map.astype(np.uint8)
+            #print(img_info['area'])
             # mask 다시 계산
-            re_mask = re_cal_mask(obj_map)
-            if re_mask[0][0]==-1:
+            obj_cal_mask, area = cal_mask(obj_map,img_info['area'], self.delete_ratio_th)
+            if obj_cal_mask[0][0]==-1:
                 print('삭제됨')
                 print('삭제된 위치:{}, {}'.format(img_info['grid_x'],img_info['grid_y']))
                 self.batch_map[img_info['grid_x']][img_info['grid_y']]=0
                 deleted_info.append(img_info)
                 continue
             
-            # bbox 다시 계산
-            re_bbox = re_cal_bbox(obj_map, re_mask, img_center, threshold)
+            # bbox계산
+            obj_cal_bbox = cal_bbox(obj_map, obj_cal_mask, img_center, threshold)
             
-            #obj_re_seg = {'mask'= re_mask, 'bbox' = re_bbox}
-            re_seg.append({'mask': re_mask, 'bbox' : re_bbox})
+            cal_seg.append({'mask': obj_cal_mask, 'bbox' : obj_cal_bbox})
             #cv2.drawContours(aug_seg_img, re_mask,-1, (255, 255, 255), 1)
             #for p in range(re_mask.shape[0]-1):
             #    cv2.line(aug_seg_img,tuple(re_mask[p]),tuple(re_mask[p+1]),(0,255,255),1)
-            cv2.rectangle(aug_seg_img, re_bbox, (255, 255, 0), 1)
-        cv2.imshow('aug_img',aug_seg_img)
-        cv2.waitKey(1)
+            #cv2.rectangle(aug_seg_img, tuple(re_bbox), (255, 255, 0), 1)
+            #cv2.putText(aug_seg_img, str(a_r), (re_bbox[0],re_bbox[1]-10), cv2.FONT_HERSHEY_COMPLEX, 0.7, (100,100,255), 1)
+
         #없어진 물품 리스트에서 지우기
         for del_info in deleted_info:
             self.image_data.remove(del_info)
         
         #bbox 다시 조절하는 함수 추가
-        re_seg2 = adjust_bbox(re_seg, self.batch_map, self.grid, self.image_data)
+        re_seg = revise_bbox(cal_seg, self.batch_map, self.grid, self.image_data, self.around_object_weight, self.re_cal_search_region)
         self.re_segmentation = re_seg
-        for seg2 in re_seg2:
-            cv2.rectangle(aug_seg_img2, seg2['bbox'], (0, 255, 255), 1)
+        for seg2 in re_seg:
+            cv2.rectangle(aug_seg_img2, tuple(seg2['bbox']), (0, 255, 255), 1)
         cv2.imshow('aug_img',aug_seg_img)
         cv2.imshow('aug_img2',aug_seg_img2)
         cv2.waitKey(0)
@@ -1060,8 +1199,32 @@ class augment:
         이미지 및 재 계산된 mask와 bbox 정보를 DB에 저장
         입력 : 후처리된 합성된 이미지, 다시 계산된 segmentation 정보
         '''
-        pass
-
+        #print(self.re_segmentation)
+        bbox = []
+        for seg in self.re_segmentation:
+            bbox.append(seg['bbox'])
+        img = self.aug_img
+        #img_line = np.ravel(img, order='C')
+        #print(img_line)
+        img_list = img.tolist()
+        #print(img_list)
+        #img_bytes = bytes(img_list, encoding('utf-8'))
+        #print(img_bytes)
+        aug_DB = {'bbox':bbox, 'image':img_list}
+        aug_DB_json=json.dumps(aug_DB)
+        #print(io.getvalue())
+        
+        #디코딩 확인
+        #re = json.loads(aug_DB_json)
+        #img = aug_DB['image']
+        #img_re = np.array(img, dtype=np.uint8)
+        #cv2.imshow('img_re',img_re)
+        #cv2.imshow('aug_img2',aug_seg_img2)
+        #cv2.waitKey(0)
+        #print(re)
+        return aug_DB_json
+        
+        
     def augment_main(self):
         '''
         순서:
@@ -1075,46 +1238,49 @@ class augment:
         '''
         pass
 
-    
+# 여기는 실행참고용
+
+#import time 
 #여기서 부터는 개인적으로 테스트 용으로 사용
 #아래 grid, object_category, category_grid, batch_method, background는 실제로 annotation tool에서 받아와야하는 값들
-delete_pos =[[0,-1],[1,-1],[2,-1],[3,-1],[4,-1],[5,-1],[6,-1],[-1,0],[-1,2],[-1,5]]    
-grid = (7,7)
-print(grid[0])
-object_category=[11,12,13,14,15,16,17,18,19,20]
-category_grid = list([[[1 for row in range(grid[1])] for col in range(grid[0])]for cate in range(len(object_category))])
-for cate in range(len(object_category)):
-    if delete_pos[cate][0]==-1:
-        for row in range(grid[1]): 
-            category_grid[cate][row][delete_pos[cate][1]]=0
-    else:
-        for col in range(grid[0]):
-            category_grid[cate][delete_pos[cate][0]][col]=0
-batch_method = 3
-background = cv2.imread("D:\\ImageData\\datavoucher\\Train_align_2450\\b0.jpg")
+# delete_pos =[[0,-1],[1,-1],[2,-1],[3,-1],[4,-1],[5,-1],[6,-1],[-1,0],[-1,2],[-1,5]]    
+# category_grid = list([[[1 for row in range(grid[1])] for col in range(grid[0])]for cate in range(len(object_category))])
+# for cate in range(len(object_category)):
+#     if delete_pos[cate][0]==-1:
+#         for row in range(grid[1]): 
+#             category_grid[cate][row][delete_pos[cate][1]]=0
+#     else:
+#         for col in range(grid[0]):
+#             category_grid[cate][delete_pos[cate][0]][col]=0
 
-batch_map = []
+# 필수
+grid = (7,7)
+object_category=[11,12,13,14,15,16,17,18,19,20]
+batch_method = 3
+background = cv2.imread("/media/jihun/Data1/ImageData/data_voucher/Train_align_2450/b0.jpg")
+
 
 #요거는 DB를 mysql쪽이 아닌 folder 이미지를 기반(테스트용)
-image_folder = "D:\\ImageData\\datavoucher\\Train_align_2450"
-seg_folder = "D:\\ImageData\\datavoucher\\Train_align_2450_info"
-center_point = (660,585)
+#image_folder = "/media/jihun/Data1/ImageData/data_voucher/Train_align_2450"
+#seg_folder = "/media/jihun/Data1/ImageData/data_voucher/Train_align_2450_info"
+#center_point = (660,585)
 
-batch_map = [[11, 19, 14, 0, 16, 0, 13], [15, 0 ,17, 14, 18, 0, 12], [20, 14, 13, 19, 18, 17, 11],              [15, 12, 19, 11, 14, 12, 0], [16, 0, 17, 15, 20, 13, 12], [11, 20, 15, 12, 18, 0, 19],             [17, 20, 0, 19, 16, 13, 0]]
-
+#batch_map = [[0, 0, 20, 18, 0, 12, 16], [0, 14, 16, 18, 0, 15, 16], [15, 16, 20, 16, 16, 15, 15], [19, 0, 17, 15, 0, 16, 0], [12, 16, 13, 11, 13, 13, 0], [0, 14, 13, 0, 13, 11, 11], [15, 15, 14, 11, 12, 12, 15]]
+#start = time.time()  # 시작 시간 저장
 
 #실제 사용함수
-aug1 = augment(grid, object_category, category_grid, center_point, batch_method, background, 1)
-#aug1.compose_batch()
-aug1.load_DB_folder(image_folder, seg_folder,batch_map)
+#aug1 = augment(grid, object_category, batch_method, background, 1, center_point, category_grid)
+aug1 = augment(grid, object_category, batch_method, background)
+aug1.compose_batch() 
+aug1.load_DB()
+#aug1.load_DB_folder(image_folder, seg_folder)
 aug1.make_background()
 aug1.make_maskmap()
 aug1.augment_image()
 aug1.re_segmentation()
+result = aug1.save_DB()
 
 
-# In[ ]:
-
-
+#print("time :", time.time() - start)  # 현재시각 - 시작시간 = 실행 시간
 
 
