@@ -5,7 +5,7 @@ import random
 import math
 import copy
 import json
-#import DB
+import DB
 
 
 def make_gridmap(dense, *args):
