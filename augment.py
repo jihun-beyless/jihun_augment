@@ -731,7 +731,6 @@ class augment:
         그 공간에 어떤 물품을 넣을지 물품을 넣는 부분으로 나뉨
         '''
         #batch_map = [[0 for row in range(self.grid[1])] for col in range(self.grid[0])]
-        print("합성할 물품 배치를 계산하는 부분 시작")
         batch_map = []
         if self.batch_method<3:
             if self.rand_option: 
@@ -745,8 +744,8 @@ class augment:
                 map_possible = [0 for i in range(self.grid[0]-p)]+[1 for i in range(p)]
                 random.shuffle(map_possible)
             # 둘다 방식은 조금 다르지만 열 단위로 봤을때 1은 들어가는 경우, 0은 들어가지 않는 경우
-            print("물품이 들어갈 위치만 결정")
-            print(map_possible)
+            #print("물품이 들어갈 위치만 결정")
+            #print(map_possible)
             if self.batch_method==1:
                 #여기는 같은 열은 같은 물체로만 배치
                 for col in range(self.grid[0]):
@@ -836,7 +835,6 @@ class augment:
         
         if batch_map!=None:
             self.batch_map = batch_map
-        print("데이터 읽기 시작")
         image_data = []
         # 여기서 물품 합성시 중앙에서 가장 먼 순서대로 배치 할 수 있도록 조정
         batch = array_DB_batch(self.grid, self.batch_map, self.array_method)
@@ -878,7 +876,6 @@ class augment:
         
         # 최종적으로 저장된 파일을 self로 저장
         self.image_data = image_data
-        print("데이터 읽기 완료")
 
     def make_background(self):
         '''
@@ -888,14 +885,14 @@ class augment:
         출력: background 이미지
         '''
         if self.shadow_flag==0:
-            print("배경에 그림자 적용 제외")
+            #print("배경에 그림자 적용 제외")
             self.background_image = self.ori_background_image
             #return self.ori_background
         else :
             # 그림자를 단순하게 적용하려면 물품의 크기에 맞는 원형 형태로 적용하는게 무난
             # 이걸 하려면 물품을 둘러싸는 타원을 구하고 그에 맞춰서 그림자를 넣어버리면 됨
             # 그래서 물품의 영역을 보여주는 타원을 구하고, 그 타원에 맞춰서 그림자를 배경에 집어 넣는 것으로 구분
-            print('배경에 그림자 적용 시작')
+            #print('배경에 그림자 적용 시작')
             shadow_background_img = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
             for img_info in self.image_data:
                 shadow = np.zeros((self.img_h, self.img_w, 3), dtype=np.uint8)
@@ -955,7 +952,7 @@ class augment:
             #cv2.imshow('bg',bg)
             #cv2.waitKey(0)
             self.background_image = bg
-            print('배경에 그림자 적용 완료')
+            #print('배경에 그림자 적용 완료')
             #return bg
 
     def make_maskmap(self):
@@ -1010,7 +1007,6 @@ class augment:
             aug_img[y_min:y_max,x_min:x_max] = np.where(obj_maskmap==img_info['mask_value'], obj_s, aug_obj)
         
         # 이미지 합성 종료
-        print('이미지 합성 완료')
         #cv2.imshow('segmap',aug_img)
         #cv2.waitKey(0)
         
@@ -1040,7 +1036,6 @@ class augment:
         aug_seg_img2 = self.aug_img.copy()
         deleted_info = []
         
-        print("mask 및 bbox 다시 계산")
         for img_info in self.image_data:
             #print(img_info['mask_value'])
             deleted_map= np.where(self.maskmap == img_info['mask_value'], 255, 0)
@@ -1053,8 +1048,8 @@ class augment:
             # mask 다시 계산
             obj_cal_mask, area = cal_mask(obj_map,img_info['area'], self.delete_ratio_th)
             if obj_cal_mask[0][0]==-1:
-                print('삭제됨')
-                print('삭제된 위치:{}, {}'.format(img_info['grid_x'],img_info['grid_y']))
+                #print('삭제됨')
+                #print('삭제된 위치:{}, {}'.format(img_info['grid_x'],img_info['grid_y']))
                 self.batch_map[img_info['grid_x']][img_info['grid_y']]=0
                 deleted_info.append(img_info)
                 continue
@@ -1105,31 +1100,37 @@ class augment:
         return img_save_path, aug_DB
         
         
-    def augment_main(self):
-        '''
-        순서:
-        -> 그리드 각각 위치에 물품 배치구성
-        -> DB에서 필요한 이미지 및 정보 찾아오기(background, 실제 물품 촬영 이미지, bbox, mask 정보)
-        -> background 이미지 만들기 (전처리+그림자)
-        -> 물품을 background에 붙이기
-        -> 이미지 후처리 (노이즈, 밝기 조절)
-        -> bbox와 mask 다시 계산
-        -> DB에 저장
-        '''
-        pass
+    # def augment_main(self):
+    #     '''
+    #     순서:
+    #     -> 그리드 각각 위치에 물품 배치구성
+    #     -> DB에서 필요한 이미지 및 정보 찾아오기(background, 실제 물품 촬영 이미지, bbox, mask 정보)
+    #     -> background 이미지 만들기 (전처리+그림자)
+    #     -> 물품을 background에 붙이기
+    #     -> 이미지 후처리 (노이즈, 밝기 조절)
+    #     -> bbox와 mask 다시 계산
+    #     -> DB에 저장
+    #     '''
+    #     pass
 
 
 #print("time :", time.time() - start)  # 현재시각 - 시작시간 = 실행 시간
 
 def aug_process(grid, object_category, batch_method, background, DB_masks,iteration_list, aug_count):
 
+    #print("합성할 물품 배치를 계산하는 부분 시작")
     aug1 = augment(grid, object_category, batch_method, background, DB_masks, iteration_list)
     aug1.compose_batch() 
     #aug1.load_DB_API()
+    #print("데이터 읽기 시작")
     aug1.load_DB()
+    #print("데이터 읽기 완료")
     aug1.make_background()
+    #print('배경에 그림자 적용 완료')
     aug1.make_maskmap()
     aug1.augment_image()
+    #print('이미지 합성 완료')
+    #print("mask 및 bbox 다시 계산")
     aug1.re_segmentation()
     img_path, result = aug1.save_DB(aug_count)
 
