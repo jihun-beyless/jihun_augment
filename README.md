@@ -12,9 +12,9 @@ pip install opencv-python
 
 pip install PyMySQL
 
-python -m pip install grpcio
+pip install grpcio
 
-python -m pip install grpcio-tools
+pip install grpcio-tools
 
 pip install --upgrade protobuf 
 
