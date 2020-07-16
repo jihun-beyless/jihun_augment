@@ -16,6 +16,6 @@ pip install grpcio
 
 pip install grpcio-tools
 
-pip install --upgrade protobuf 
+pip install protobuf 
 
 python3 -m grpc_tools.protoc -I ./proto --python_out=. --grpc_python_out=. ./proto/aug_protobuf.proto
