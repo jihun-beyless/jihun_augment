@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 #from DCD_DB_API import*
 
-sys.path.insert(0,'./DCD_DB_API-master/db_api/')
-import DB
+sys.path.insert(0,'./DCD_DB_API-master/') 
+from db_api import DB
 
 import time
 #from db_api import DB
@@ -26,7 +26,44 @@ def createFolder(directory):
     except OSError as e:
         print("Failed to create director!!"+directory)
 
-def tmp_image_save(DB_imgs, obj_id, g, g_id, obj_iter):    
+def update_value(src, th, rect, max_value):
+    src16 = src.astype(np.int16)
+    mean_value = np.sum(src16[rect[1]:(rect[1]+rect[3]), rect[0]:(rect[0]+rect[2])])/(rect[2]*rect[3])
+    diff_value = th-mean_value
+    add_img = src16+diff_value
+    update_img1 = np.where(add_img<0, 0 , add_img)
+    update_img2 = np.where(update_img1>max_value, max_value , update_img1)
+    return update_img2.astype(np.uint8)
+
+
+def edit_img_value(img, bright_param):
+    ch_flag = bright_param[2:5]
+    th_param = bright_param[5:8]
+    rect = bright_param[8:12]
+    if bright_param[1]==1:
+        src_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        max_param = [180, 255, 255]
+    elif bright_param[1]==2:
+        src_img = img
+        max_param = [255, 255, 255]
+
+    img_split = cv2.split(src_img)
+    
+    result=[]
+    for img_ch, flag_value, th, max_value in zip(img_split, ch_flag, th_param, max_param):
+        if flag_value==1:
+            re = update_value(img_ch, th, rect, max_value)
+            result.append(re)
+        else:
+            result.append(img_ch)
+
+    re_img = cv2.merge(result)
+    if bright_param[1]==1:
+        re_img = cv2.cvtColor(re_img, cv2.COLOR_HSV2BGR)
+    
+    return re_img
+
+def tmp_image_save(DB_imgs, obj_id, g, g_id, obj_iter, bright_param):    
     '''
     DB에서 받은 이미지를 tmp에 저장
     입력받은 category_id별로 이미지를 생성하며, 
@@ -41,6 +78,8 @@ def tmp_image_save(DB_imgs, obj_id, g, g_id, obj_iter):
                 img_bytes = img[3]
                 img_np = np.frombuffer(img_bytes, dtype = np.uint8)
                 img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+                if bright_param[0]==1:
+                    img = edit_img_value(img, bright_param)
                 
                 #img = img_np.reshape((1080,1920,3))
                 #cv2.imshow('DB_images', img)
@@ -70,7 +109,7 @@ def arrange_masks(DB_masks, grid, obj_iter):
                 masks_list[x-1][y-1][iter_num-1] = [obj_mask[1:3] for obj_mask in sort_mask]
     return masks_list
 
-def get_DB_data(db, obj_category, grid, grid_id, iteration, background_id):
+def get_DB_data(db, obj_category, grid, grid_id, iteration, background_id, bright_param):
     
     get_flag = True
     createFolder('/tmp/augment_DB')
@@ -105,7 +144,7 @@ def get_DB_data(db, obj_category, grid, grid_id, iteration, background_id):
             get_flag = False
             break
         print('임시로 tmp에 이미지 저장')
-        img_save_flag = tmp_image_save(DB_images, cate_id, grid, grid_id, obj_iter)
+        img_save_flag = tmp_image_save(DB_images, cate_id, grid, grid_id, obj_iter, bright_param)
         if not img_save_flag:   
             get_flag = False
             break
@@ -212,7 +251,7 @@ def set_aug_result(db, aug_segs, grid, grid_id, device_id, images_path):
 
     return True
 
-def aug_main(device_id, grid, grid_id, object_category, background_id, iteration, batch_num):
+def aug_main(device_id, grid, grid_id, object_category, background_id, iteration, batch_num, bright_param):
     """
     합성과정 전체 돌아가는 메인 함수
     입력값은 7개로 gRPC를 통해서 json으로 전달 받도록 짜려고 예상
@@ -227,7 +266,6 @@ def aug_main(device_id, grid, grid_id, object_category, background_id, iteration
         batch_num (list or tuple): 이미지 생성할 갯수로 3가지 합성 방법에 따라 합성 갯수를 정해서 받음 ex) [4000, 3000, 3000]
     """
 
-
     if str(type(iteration))=="<class 'int'>" :
         iteration_list = [iteration for a in range(len(object_category))]
     else:
@@ -238,7 +276,7 @@ def aug_main(device_id, grid, grid_id, object_category, background_id, iteration
 
     # 먼저 DB에서 file을 읽어오기
     print('read DB data for augmentation')
-    DB_mask, background, flag = get_DB_data(db, object_category, grid, grid_id, iteration_list, background_id)
+    DB_mask, background, flag = get_DB_data(db, object_category, grid, grid_id, iteration_list, background_id, bright_param)
     #DB_mask = get_data(object_category, grid, grid_id, iteration_list, image_size)
     if not flag:
         print('DB에서 합성에 필요한 데이터 읽기 실패')
@@ -253,15 +291,17 @@ def aug_main(device_id, grid, grid_id, object_category, background_id, iteration
     batch_method_list = [1 for i in range(batch_num[0])]
     batch_method_list.extend([2 for i in range(batch_num[1])])
     batch_method_list.extend([3 for i in range(batch_num[2])])
+    #cv2.imshow('bg',background)
+    #cv2.waitKey(0)
     
     print('start augmentation')
     for batch_method in batch_method_list:
         if len(result_data)==cut_value:
             print('save dataset')
-            aug_save_flag = set_aug_result(db, result_data, grid, grid_id, device_id, img_path_list)
-            if not aug_save_flag:
-                print('합성이미지 {}~{}번까지 데이터 저장 실패'.format(aug_count-cut_value, aug_count))
-                return False
+            #aug_save_flag = set_aug_result(db, result_data, grid, grid_id, device_id, img_path_list)
+            #if not aug_save_flag:
+            #    print('합성이미지 {}~{}번까지 데이터 저장 실패'.format(aug_count-cut_value, aug_count))
+            #    return False
             result_data = []
             img_path_list = []
             #save_count+=1
@@ -272,10 +312,10 @@ def aug_main(device_id, grid, grid_id, object_category, background_id, iteration
         img_path_list.append(img_path)
         aug_count +=1
     print('save dataset')
-    aug_save_flag = set_aug_result(db, result_data, grid, grid_id, device_id, img_path_list)
-    if not aug_save_flag:
-        print('합성이미지 {}~{}번까지 데이터 저장 실패'.format(aug_count-cut_value, aug_count-1))
-        return False
+    #aug_save_flag = set_aug_result(db, result_data, grid, grid_id, device_id, img_path_list)
+    #if not aug_save_flag:
+    #    print('합성이미지 {}~{}번까지 데이터 저장 실패'.format(aug_count-cut_value, aug_count-1))
+    #    return False
 
     print('finish all augmentations')
     return True
@@ -285,10 +325,12 @@ if __name__ == "__main__":
     # 이건 tool에서 입력으로 받아와야 하는 변수들
     # 20001, 2, 3, 1, [1, 2], 3, 29
     device_id = 20001
-    grid = (2,3)
-    grid_id = 1
-    object_category=[1, 2]
-    background_id = 29
+    grid = (6,5)
+    grid_id = 3
+    object_category=[1, 3]
+    background_id = 348
     iteration = 3
     batch_num = [2, 2, 2]
-    aug_main(device_id, grid, grid_id, object_category, background_id, iteration, batch_num)
+    # bright_param : [bright_flag, mode_flag, flag1, flag2, flag3, th1, th2, th3, rect x, rect y, rect w, rect h] 
+    bright_param = [1, 1, 1, 1, 1, 78, 36, 113, 1140, 440, 100, 200]
+    aug_main(device_id, grid, grid_id, object_category, background_id, iteration, batch_num, bright_param)
