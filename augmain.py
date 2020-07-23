@@ -171,12 +171,12 @@ def load_aug_images(images_path):
     return images
 
 def set_aug_result(db, aug_segs, grid, grid_id, device_id, images_path):
-    try:
-        f = open("iter_num.txt", 'r')
-        obj_iter_start_num = int(f.readline())
-        f.close()
-    except:
-        obj_iter_start_num = 10
+    # try:
+    #     f = open("aug_num.txt", 'r')
+    #     obj_aug_start_num = int(f.readline())
+    #     f.close()
+    # except:
+    #     obj_aug_start_num = 1
     
     
     obj_data_list = []
@@ -204,22 +204,23 @@ def set_aug_result(db, aug_segs, grid, grid_id, device_id, images_path):
     #end_time = time.time()
     #print('total_time: ', end_time - start_time)
 
-    iter_num = obj_iter_start_num
+    aug_num = db.get_obj_max_aug()
     for img_segs, img_id  in zip(aug_segs, range(start_img_id, end_img_id)):
         #우선 obj 정보부터 저장
         for seg in img_segs:
             loc_id = loc_id_table[seg['x']][seg['y']]
             cate_id = seg['category_id']
-            obj_data_list.append((str(img_id), str(loc_id), str(cate_id), str(iter_num), str(-1)))
+            iter_num = seg['iteration']
+            obj_data_list.append((str(img_id), str(loc_id), str(cate_id), str(iter_num), str(-1), str(aug_num)))
             bbox_info.append(seg['bbox'])
-            iter_num +=1
+            aug_num +=1
 
     #print(obj_data_list)
     
     #증가된 obj_id만큼 txt에서도 값 증가
-    f = open("iter_num.txt", 'w')
-    f.write(str(iter_num))
-    f.close()
+    # f = open("aug_num.txt", 'w')
+    # f.write(str(aug_num))
+    # f.close()
 
     print('합성된 Object정보를 DB에 저장')
     start_obj_id = db.get_last_id('Object')+1

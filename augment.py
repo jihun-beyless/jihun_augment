@@ -73,7 +73,7 @@ def cal_obj_center(mask):
     #물체의 중심 좌표
     obj_cx = int(M['m10'] / M['m00'])
     obj_cy = int(M['m01'] / M['m00'])
-    return (obj_cx, obj_cy)
+    return [obj_cx, obj_cy]
 
 def cal_mask(obj_map, ori_area, area_ratio_th = 0.06):
     '''
@@ -589,6 +589,7 @@ def revise_bbox(segment, batch_map, grid, image_data, around_object_value, re_ca
         seg_batch_map[img_info['grid_x']][img_info['grid_y']]['area'] = img_info['area']
         seg_batch_map[img_info['grid_x']][img_info['grid_y']]['x'] = img_info['grid_x']
         seg_batch_map[img_info['grid_x']][img_info['grid_y']]['y'] = img_info['grid_y']
+        seg_batch_map[img_info['grid_x']][img_info['grid_y']]['iteration'] = img_info['iteration']
 
     # 이제 여기서 부터 실제 겹치는 부분을 정리
     for seg, img_info in zip(segment, image_data):
@@ -857,7 +858,11 @@ class augment:
             data_info['category'] = cate_id
             
             cate_index =self.object_category.index(cate_id)
-            mask = self.mask_data[cate_index][b[0]][b[1]][self.iteration[cate_index]-1]
+
+            iter_value = random.randrange(self.iteration[cate_index])
+            data_info['iteration'] = iter_value
+
+            mask = self.mask_data[cate_index][b[0]][b[1]][iter_value]
             data_info['mask'] = mask
             mask_np = np.array(mask)
             area = cv2.contourArea(mask_np)
@@ -865,7 +870,7 @@ class augment:
             #print(area)
             
             #이미지를 opencv로 읽어오기
-            image_name = str('{}x{}_{}.jpg').format(b[0]+1, b[1]+1, self.iteration[cate_index])
+            image_name = str('{}x{}_{}.jpg').format(b[0]+1, b[1]+1, iter_value+1)
             image_path = '/tmp/augment_DB/'+str(cate_id)+'/'+image_name
             img = cv2.imread(image_path)
             #이미지 저장
@@ -937,7 +942,7 @@ class augment:
                 #크기가 다른 shadow_value개의 타원을을 순차적으로 겹쳐서 부드럽게 그림자를 만듬
                 for j in range(self.shadow_value):
                     w_d = (self.shadow_value-j+1)*0.2/(self.shadow_value+1)
-                    cv2.ellipse(shadow, obj_center, (int(length_w * self.ellipse_param[0] + length_h * w_d), int(length_h * self.ellipse_param[1])), \
+                    cv2.ellipse(shadow, tuple(obj_center), (int(length_w * self.ellipse_param[0] + length_h * w_d), int(length_h * self.ellipse_param[1])), \
                                 (angle * 180 / math.pi), 0, 360,(j, j, j), -1)
                 
                 shadow_background_img = shadow_background_img + shadow 
