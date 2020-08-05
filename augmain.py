@@ -275,6 +275,8 @@ def aug_main(device_id, grid, grid_id, object_category, background_id, iteration
     # DB접속
     db = DB.DB(ip='192.168.10.69', port=3306, user='root', password='return123', db_name='test')
 
+    db.db_to_json('./json/aug.json','./json/img')
+    #db.db_to_json_type('./json','./json/img',3)
     # 먼저 DB에서 file을 읽어오기
     print('read DB data for augmentation')
     DB_mask, background, flag = get_DB_data(db, object_category, grid, grid_id, iteration_list, background_id, bright_param)

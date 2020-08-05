@@ -13,7 +13,7 @@ def run(de_id, g, g_id, obj_cate, bg_id, iter_num, b_num, b_param):
     str_cate = ' '.join(map(str, obj_cate))
     bright = ' '.join(map(str,b_param))
     
-    with grpc.insecure_channel('localhost:50051') as channel:
+    with grpc.insecure_channel('192.168.10.52:50051') as channel:
         stub = aug_protobuf_pb2_grpc.TransactionAugmentStub(channel)
         
         result_response = stub.SendAugmentData(aug_protobuf_pb2.AugType(device_id = de_id, grid_x = g[0], grid_y = g[1], grid_id = g_id, \
